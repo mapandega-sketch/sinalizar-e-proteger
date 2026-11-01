@@ -4,13 +4,16 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { Sky } from "three/addons/objects/Sky.js";
 import { RoomEnvironment } from "three/addons/environments/RoomEnvironment.js";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
+import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 
 const $ = (id) => document.getElementById(id);
 
 // ---------- Renderer / sky / light ----------
 const canvas = $("view");
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+// "Modo leve" automático: celulares e computadores mais fracos
+const LITE = matchMedia("(pointer: coarse)").matches || (navigator.hardwareConcurrency || 8) <= 4 || /[?&]leve\b/.test(location.search);
+renderer.setPixelRatio(Math.min(devicePixelRatio, LITE ? 1.25 : 2));
 renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.95;
 const scene = new THREE.Scene();
@@ -23,9 +26,36 @@ sky.material.uniforms.sunPosition.value.copy(sunDir);
 scene.fog = new THREE.Fog("#C9CFD3", 350, 2600);
 const dayBg = (() => { const c = document.createElement("canvas"); c.width = 4; c.height = 256; const g = c.getContext("2d"); const gr = g.createLinearGradient(0, 0, 0, 256); gr.addColorStop(0, "#9FA9B1"); gr.addColorStop(0.55, "#C4CBD0"); gr.addColorStop(1, "#DADEE0"); g.fillStyle = gr; g.fillRect(0, 0, 4, 256); const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t; })();
 sky.visible = false; scene.background = dayBg;
+// Overcast sky dome with soft clouds; its bottom matches the fog colour so the horizon blends in
+const cloudTex = (() => {
+  const W = 2048, H = 512, c = document.createElement("canvas"); c.width = W; c.height = H; const g = c.getContext("2d");
+  const gr = g.createLinearGradient(0, 0, 0, H); gr.addColorStop(0, "#8D98A2"); gr.addColorStop(0.55, "#B6BEC5"); gr.addColorStop(1, "#C9CFD3");
+  g.fillStyle = gr; g.fillRect(0, 0, W, H);
+  for (let i = 0; i < 1100; i++) {
+    const y = Math.pow(Math.random(), 1.3) * H * 0.94, x = Math.random() * W, r = (18 + Math.random() * 70) * (1 - y / H * 0.55), light = Math.random() < 0.58;
+    const sy = 0.35 + (y / H) * 0.25;
+    [x - W, x, x + W].forEach((xx) => {
+      g.save(); g.translate(xx, y); g.scale(2.4, sy);
+      const rg = g.createRadialGradient(0, 0, 0, 0, 0, r);
+      rg.addColorStop(0, light ? "rgba(238,240,242,0.30)" : "rgba(112,120,130,0.20)"); rg.addColorStop(1, "rgba(200,205,210,0)");
+      g.fillStyle = rg; g.beginPath(); g.arc(0, 0, r, 0, Math.PI * 2); g.fill(); g.restore();
+    });
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.wrapS = THREE.RepeatWrapping; return t;
+})();
+const skyDome = new THREE.Mesh(new THREE.SphereGeometry(4200, 48, 24, 0, Math.PI * 2, 0, Math.PI / 2), new THREE.MeshBasicMaterial({ map: cloudTex, side: THREE.BackSide, fog: false, depthWrite: false, toneMapped: false }));
+skyDome.renderOrder = -10; scene.add(skyDome);
+(() => {
+  // outdoor reflections (vehicles, guardrail, signs) from the cloudy sky instead of a studio room
+  const envScene = new THREE.Scene();
+  envScene.add(new THREE.Mesh(skyDome.geometry, new THREE.MeshBasicMaterial({ map: cloudTex, side: THREE.BackSide })));
+  const gnd = new THREE.Mesh(new THREE.CircleGeometry(4200, 32), new THREE.MeshBasicMaterial({ color: "#5E6B4C" })); gnd.rotation.x = -Math.PI / 2; envScene.add(gnd);
+  scene.environment = new THREE.PMREMGenerator(renderer).fromScene(envScene, 0.02, 1, 6000).texture;
+  scene.environmentIntensity = 0.7;
+})();
 const hemi = new THREE.HemisphereLight("#E8EDF0", "#6A6656", 1.35); scene.add(hemi);
 const sun = new THREE.DirectionalLight("#F5F2EC", 1.5);
-sun.castShadow = true; sun.shadow.mapSize.set(2048, 2048); sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.03;
+sun.castShadow = true; sun.shadow.mapSize.set(LITE ? 1024 : 2048, LITE ? 1024 : 2048); sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.03;
 Object.assign(sun.shadow.camera, { left: -45, right: 45, top: 45, bottom: -45, near: 1, far: 220 });
 scene.add(sun, sun.target);
 const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 6000);
@@ -76,13 +106,19 @@ const RAIL = LANE + SH + 0.85, SLOPE0 = 9.5, SLOPE1 = 26, SLOPEH = 7;
 const world = new THREE.Group(); scene.add(world);
 function strip(z0, z1, mat, y = 0) { const p = mesh(new THREE.PlaneGeometry(LEN, z1 - z0), mat, world, XC, y, (z0 + z1) / 2); p.rotation.x = -Math.PI / 2; p.castShadow = false; return p; }
 function texMat(t, rx, ry, o = {}) { const c = t.clone(); c.needsUpdate = true; c.repeat.set(rx, ry); return M("#FFFFFF", { map: c, roughness: 0.92, ...o }); }
-const grass = mesh(new THREE.PlaneGeometry(8000, 3000), texMat(TX.grass, 800, 300), world, XC, -0.05, 0); grass.rotation.x = -Math.PI / 2; grass.castShadow = false;
+const grass = (() => {
+  const geo = new THREE.PlaneGeometry(11000, 9000, 220, 180), pos = geo.attributes.position, col = [];
+  const n2 = (x, y) => Math.sin(x * 0.011 + Math.sin(y * 0.007) * 2) * Math.cos(y * 0.013 + Math.sin(x * 0.005) * 2) + 0.5 * Math.sin(x * 0.031 + y * 0.027);
+  for (let i = 0; i < pos.count; i++) { const v = n2(pos.getX(i), pos.getY(i)), k = 0.86 + 0.12 * v; col.push(k * (v > 0.6 ? 1.06 : 1), k, k * (v < -0.6 ? 0.88 : 0.97)); }
+  geo.setAttribute("color", new THREE.Float32BufferAttribute(col, 3));
+  const m = mesh(geo, texMat(TX.grass, 1100, 900, { vertexColors: true }), world, XC, -0.05, 0); m.rotation.x = -Math.PI / 2; m.castShadow = false; return m;
+})();
 strip(-LANE, LANE, texMat(TX.asphalt, LEN / 6, 1.2));
-strip(LANE, LANE + SH, texMat(TX.asphalt, LEN / 6, 0.4, { color: "#D9D6CF" }), 0.001);      // older, lighter shoulder
+strip(LANE, LANE + SH, texMat(TX.asphalt, LEN / 6, 0.4, { color: "#BDB9B1" }), 0.001);      // older, lighter shoulder
 strip(LANE + SH, RAIL + 0.3, texMat(TX.gravel, LEN / 4, 0.3), -0.01);
 strip(NJZ + 0.35, -LANE, texMat(TX.asphalt, LEN / 6, 0.2), 0.001);
 strip(OPP - 2 * LANE - 0.6, OPP, texMat(TX.asphalt, LEN / 6, 1.2));
-strip(OPP - 2 * LANE - 0.6 - SH, OPP - 2 * LANE - 0.6, texMat(TX.asphalt, LEN / 6, 0.4, { color: "#D9D6CF" }), 0.001);
+strip(OPP - 2 * LANE - 0.6 - SH, OPP - 2 * LANE - 0.6, texMat(TX.asphalt, LEN / 6, 0.4, { color: "#BDB9B1" }), 0.001);
 const paint = M("#F4F4F0", { roughness: 0.5, polygonOffset: true, polygonOffsetFactor: -2 });
 const yellow = M("#F2C230", { roughness: 0.5, polygonOffset: true, polygonOffsetFactor: -2 });
 function line(z, mat, w = 0.15, dash = 0, gap = 0, y = 0.006) {
@@ -136,7 +172,7 @@ const slopeY = (z) => z <= SLOPE0 ? 0 : z >= SLOPE1 ? SLOPEH : (z - SLOPE0) / (S
   const ico = new THREE.IcosahedronGeometry(1, 1), trunkG = new THREE.CylinderGeometry(0.5, 0.7, 1, 7);
   const parts = { leaf0: [], leaf1: [], leaf2: [], bamboo: [], bark: [], eu: [] };
   const put = (k, x, y, z, sx, sy, sz, rx = 0, rz = 0) => parts[k].push([x, y, z, sx, sy, sz, rx, rz]);
-  for (let i = 0; i < 260; i++) {
+  for (let i = 0, nTrees = LITE ? 240 : 380; i < nTrees; i++) {
     const right = Math.random() < 0.6, x = rnd(X0, X1), z = right ? rnd(SLOPE0 + 4, 70) : rnd(OPP - 2 * LANE - 8, -80), y = right ? slopeY(z) : 0, t = Math.random();
     if (t < 0.35) { // bamboo clump
       for (let k = 0; k < 6; k++) { const a = k / 6 * Math.PI * 2; put("bamboo", x + Math.cos(a) * 1.2, y + 5.5, z + Math.sin(a) * 1.2, 1.1, 6, 1.1, Math.sin(a) * 0.35, -Math.cos(a) * 0.35); }
@@ -156,6 +192,34 @@ const slopeY = (z) => z <= SLOPE0 ? 0 : z >= SLOPE1 ? SLOPEH : (z - SLOPE0) / (S
   // utility poles on the embankment
   for (let x = X0; x < X1; x += 70) { const y = slopeY(16); cyl(0.12, 0.16, 9, M("#9A968C", { roughness: 0.9 }), world, x, y + 4.5, 16, 8); box(1.6, 0.12, 0.12, M("#9A968C"), world, x, y + 8.6, 16); }
 })();
+// ---------- Roadside grass tufts and wheel-path wear (cheap instanced detail) ----------
+(() => {
+  const tuftTex = canvasTex(128, (g, w, h) => {
+    g.clearRect(0, 0, w, h);
+    for (let i = 0; i < 46; i++) { const x = 10 + Math.random() * (w - 20), top = 8 + Math.random() * 60, lean = (Math.random() - 0.5) * 30;
+      g.strokeStyle = ["#5C7A3C", "#6F8E45", "#839C55", "#4E6A33", "#9AA866"][i % 5]; g.lineWidth = 2 + Math.random() * 3; g.lineCap = "round";
+      g.beginPath(); g.moveTo(x, h); g.quadraticCurveTo(x + lean * 0.3, (h + top) / 2, x + lean, top); g.stroke(); }
+  });
+  tuftTex.wrapS = tuftTex.wrapT = THREE.ClampToEdgeWrapping;
+  const a = new THREE.PlaneGeometry(1, 1); a.translate(0, 0.5, 0); const b = a.clone(); b.rotateY(Math.PI / 2);
+  const geo = mergeGeometries([a, b]);
+  const mat = new THREE.MeshStandardMaterial({ map: tuftTex, alphaTest: 0.45, side: THREE.DoubleSide, roughness: 0.95 });
+  const N = LITE ? 2500 : 6000, im = new THREE.InstancedMesh(geo, mat, N), m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), sc = new THREE.Vector3(), p = new THREE.Vector3();
+  const farEdge = OPP - 2 * LANE - 0.6 - SH;
+  for (let i = 0; i < N; i++) {
+    const right = Math.random() < 0.62, x = rnd(X0, X1);
+    const z = right ? (Math.random() < 0.45 ? rnd(RAIL + 0.5, RAIL + 3) : rnd(RAIL + 3, SLOPE1 + 6)) : rnd(farEdge - 14, farEdge - 0.4);
+    const y = right ? slopeY(z) : 0, s = rnd(0.35, 0.95);
+    q.setFromEuler(e.set(0, Math.random() * Math.PI, 0)); im.setMatrixAt(i, m4.compose(p.set(x, y - 0.03, z), q, sc.set(s * rnd(0.8, 1.4), s, s)));
+  }
+  im.frustumCulled = false; world.add(im);
+  // darker, polished wheel paths in each lane of both carriageways
+  const wear = M("#24262A", { roughness: 0.55, transparent: true, opacity: 0.16, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1 });
+  [-LANE / 2, LANE / 2, OPP - 0.3 - LANE / 2, OPP - 0.3 - LANE * 1.5].forEach((zc) => [-0.85, 0.85].forEach((o) => {
+    const w = mesh(new THREE.PlaneGeometry(LEN, 0.75), wear, world, XC, 0.003, zc + o); w.rotation.x = -Math.PI / 2; w.castShadow = false;
+  }));
+})();
+
 // ---------- Portable work-zone signs, in the format used on the BR-101 photos ----------
 // Orange rectangular board, warning diamond inside and the distance panel below; prismatic film; steel A-frame (cavalete).
 const ORANGE = "#F7931E";
@@ -718,7 +782,7 @@ function setProblems({ lean = false, damaged = false } = {}) { setLean(sign80, l
 // ---------- Day / night ----------
 let night = false;
 function setNight(on) {
-  night = on;
+  night = on; skyDome.visible = !on;
   scene.background = on ? new THREE.Color("#05080F") : dayBg;
   scene.fog.color.set(on ? "#05080F" : "#C9CFD3"); scene.fog.near = on ? 60 : 350; scene.fog.far = on ? 520 : 2600;
   sun.intensity = on ? 0.12 : 1.5; sun.color.set(on ? "#8FA8FF" : "#F5F2EC");
@@ -758,18 +822,22 @@ const view = (k, instant) => camTo(VIEWS[k][0], VIEWS[k][1], instant);
 
 // driver's-eye drive through the work zone
 const myCar = car("#3F5F8F"); world.add(myCar); myCar.visible = false;
+const hood = new THREE.Group(); myCar.add(hood); hood.visible = false;
+rbox(1.7, 0.1, 1.72, 0.05, PAINT("#3F5F8F"), hood, 1.45, 1.0, 0);
+box(0.35, 0.22, 1.7, M("#1E2024", { roughness: 0.8 }), hood, 0.72, 1.12, 0);
+function carBody(on) { myCar.children.forEach((o) => { if (o !== hood && (o.isMesh || o.isGroup)) o.visible = on; }); hood.visible = !on; }
 const driveLight = new THREE.SpotLight("#FFF4E0", 0, 170, 0.42, 0.45, 1.2); myCar.add(driveLight); driveLight.position.set(2.2, 0.8, 0); driveLight.target.position.set(40, 0, 0); myCar.add(driveLight.target);
 let drive = null;
 function vAt(x) { if (x < sx(2)) return VREG; if (x < sx(4)) return 80; if (x < WORK1 + 145) return 60; return VREG; }
 function zAt(x) { if (x < T0) return LANE / 2; if (x < T1) return LANE / 2 - LANE * ((x - T0) / TAPER); if (x < WORK1 + 45) return -LANE / 2; return -LANE / 2 + LANE * Math.min(1, (x - WORK1 - 45) / 60); }
 function startDrive(speedUp = 3, onEnd) {
   drive = { x: sx(0) - 120, v: VREG, speedUp, onEnd };
-  myCar.visible = true; controls.enabled = false; tags.forEach((s) => s.visible = false); $("speed").hidden = false; $("reg").textContent = `${VREG} leves / ${VHEAVY} pesados`;
+  myCar.visible = true; carBody(false); controls.enabled = false; tags.forEach((s) => s.visible = false); $("speed").hidden = false; $("reg").textContent = `${VREG} leves / ${VHEAVY} pesados`;
   $("tDrive").classList.add("on");
 }
 function stopDrive() {
   if (!drive) return; const f = drive.onEnd; drive = null;
-  myCar.visible = false; controls.enabled = true; tags.forEach((s) => s.visible = true); $("speed").hidden = true; $("tDrive").classList.remove("on");
+  myCar.visible = false; carBody(true); controls.enabled = true; tags.forEach((s) => s.visible = true); $("speed").hidden = true; $("tDrive").classList.remove("on");
   applyNightSel();
   view("overview"); f && f();
 }
@@ -798,26 +866,26 @@ function ask(key, eyebrow, q, opts, onOk) {
 function showAreas(keys) { Object.entries(Z).forEach(([k, g]) => g.visible = keys.includes(k)); }
 const ALL = ["pre", "trans", "prot", "work", "ret", "fim"];
 
-// ---------- The test ----------
-const TOTAL = 11;
+// ---------- The test (short: 6 steps) ----------
+const TOTAL = 6;
 const AREA_ORDER = [
-  ["pre", "Pré-sinalização (placas de advertência e de velocidade)"],
-  ["trans", "Área de transição (tambores e cones em diagonal)"],
-  ["prot", "Área de proteção (barreira, tambores e radar de velocidade)"],
-  ["work", "Canteiro de obras (equipe e máquinas entram)"],
-  ["ret", "Área de retorno à situação normal"],
-  ["fim", "Sinalização de fim das obras"]
+  ["pre", "Pré-sinalização"],
+  ["trans", "Transição"],
+  ["prot", "Área de proteção"],
+  ["work", "Canteiro"],
+  ["ret", "Retorno"],
+  ["fim", "Fim das obras"]
 ];
 function intro() {
   S.running = false; S.demo = false; $("demoNote").hidden = true; acts("");
   showAreas(ALL); setProblems(); setNight(false); applyAllOn(); view("overview", true);
-  setStep("BR", null, "BR-101 · Pista Sul · faixa 2 interditada", "Explore a obra de dia e de noite, ou faça o teste.");
-  card(`<div class="eyebrow">Treinamento · Sinalização de obras · DNIT IPR-738</div>
-    <h1>Recuperação do pavimento na faixa 2 da BR-101, de dia e de noite</h1>
-    <p>Cenário montado a partir das fotos de acompanhamento do trecho km 248 ao 253, Pista Sul, faixa 2 (22 e 23/10/2026). Velocidade regulamentada de ${VREG} km/h para veículos leves e ${VHEAVY} km/h para pesados. A sinalização segue o Manual de Sinalização de Obras e Emergências em Rodovias do DNIT (IPR-738).</p>
-    <div class="zones"><span>Pré-sinalização</span><b>a partir de 2 km</b><span>Transição</span><b>${TAPER} m (acima de 80 km/h)</b><span>Área de proteção</span><b>30 m antes · 15 m depois</b><span>Espaçamento</span><b>15 m na transição · 30 m na reta</b></div>
-    <div class="acts"><button class="btn primary" type="button" id="goTest">Fazer o teste</button><button class="btn" type="button" id="goExplore">Explorar a obra</button></div>
-    <p class="fine">A ordem e as distâncias das placas foram tiradas das fotos e devem ser conferidas com o projeto de sinalização aprovado. Simulação de apoio: não substitui o projeto, o manual da concessionária nem o treinamento prático.</p>`);
+  setStep("BR", null, "BR-101 · Pista Sul · faixa 2 interditada", "Explore a obra ou faça o teste.");
+  card(`<div class="eyebrow">Sinalização de obras · DNIT IPR-738</div>
+    <h1>Faixa 2 interditada na BR-101</h1>
+    <p>Trecho km 248–253, Pista Sul. Velocidade: ${VREG} km/h leves, ${VHEAVY} km/h pesados.</p>
+    <div class="zones"><span>Pré-sinalização</span><b>a partir de 2 km</b><span>Transição</span><b>${TAPER} m</b><span>Proteção</span><b>30 m antes · 15 m depois</b><span>Cones</span><b>15 m transição · 30 m reta</b></div>
+    <div class="acts"><button class="btn primary" type="button" id="goTest">Fazer o teste (6 perguntas)</button><button class="btn" type="button" id="goExplore">Explorar a obra</button></div>
+    <p class="fine">Simulação de apoio. Confira sempre o projeto de sinalização aprovado.</p>`);
   $("goTest").onclick = startTest;
   $("goExplore").onclick = explore;
 }
@@ -830,76 +898,59 @@ function explore() {
 function startTest() {
   closeCard(); S.errors = 0; S.log = []; S.t0 = performance.now(); S.running = true; S.demo = false; $("errs").textContent = "0"; $("demoNote").hidden = true;
   setNight(false); setProblems(); showAreas([]); view("overview");
-  setStep(1, TOTAL, "A rodovia está livre. Vamos montar a sinalização da obra.", "");
-  setTimeout(qPre, 600);
-}
-function qPre() {
-  setStep(1, TOTAL, "Pré-sinalização", "");
-  ask("pre", "Pré-sinalização", `No trecho, a velocidade é ${VREG} km/h para leves. A equipe começa a pré-sinalização com “Obras a 2 km”. Por que tão longe?`, [
-    { t: "Por costume: o manual pede só 300 m, o resto é excesso de zelo", why: `A ${VREG} km/h o motorista precisa de distância para ser avisado e reduzir aos poucos. Para estreitamento de pista, o manual do DNIT pede no mínimo 1000 m.` },
-    { t: `Porque a ${VREG} km/h o motorista precisa ser avisado bem antes e reduzir aos poucos; o mínimo do manual para estreitamento é 1000 m, e começar a 2 km dá mais margem`, ok: true, okMsg: "Certo: aviso com antecedência e redução gradual.", log: "Entendeu a pré-sinalização começando a 2 km" },
-    { t: "Para a placa ficar perto do posto de pesagem e da fiscalização", why: "A distância é definida pela segurança do motorista que se aproxima da obra." }
-  ], qTaper);
+  setStep(1, TOTAL, "Vamos montar a sinalização da obra.", "");
+  setTimeout(qTaper, 600);
 }
 function qTaper() {
-  setStep(2, TOTAL, "Área de transição", "");
-  ask("trans", "Área de transição", `Com velocidade regulamentada de ${VREG} km/h para leves, qual deve ser o comprimento da transição (a diagonal que tira os carros da faixa 2)?`, [
-    { t: "100 m", why: "100 m é para velocidade até 60 km/h." },
-    { t: "150 m, porque os pesados andam a 80 km/h", why: "A transição é dimensionada pela velocidade regulamentada da via. Acima de 80 km/h, são 200 m." },
-    { t: "200 m", ok: true, okMsg: "Certo: 200 m para velocidades acima de 80 km/h.", log: "Transição de 200 m para 100 km/h" }
+  setStep(1, TOTAL, "Transição", "");
+  ask("trans", "Transição", `Via a ${VREG} km/h. Qual o comprimento da transição?`, [
+    { t: "100 m", why: "100 m é para até 60 km/h." },
+    { t: "150 m", why: "150 m é para até 80 km/h." },
+    { t: "200 m", ok: true, okMsg: "Certo: 200 m acima de 80 km/h.", log: "Transição de 200 m" }
   ], qSpacing);
 }
 function qSpacing() {
-  setStep(3, TOTAL, "Espaçamento dos dispositivos", "");
-  ask("esp", "Dispositivos de canalização", "Qual é o espaçamento máximo entre cones e tambores?", [
-    { t: "30 m na transição e 60 m no trecho reto", why: "Na mudança de faixa o espaçamento é menor: no máximo 15 m. Na reta, no máximo 30 m." },
-    { t: "15 m na transição (mudança de faixa) e 30 m no trecho reto", ok: true, okMsg: "Certo: 15 m na transição e 30 m na reta.", log: "Dispositivos a no máximo 15 m na transição e 30 m na reta" },
-    { t: "O mesmo espaçamento em toda a obra, de 30 m, porque os tambores são maiores que os cones", why: "Mesmo com tambores, na transição o máximo é 15 m." }
-  ], qProt);
-}
-function qProt() {
-  setStep(4, TOTAL, "Área de proteção", "");
-  ask("prot", "Área de proteção", "Entre o fim da transição e o canteiro existe a área de proteção. O que é correto?", [
-    { t: "Ter de 30 a 50 m antes do canteiro, livre de material e equipamento, com barreira e dispositivos sinalizados", ok: true, okMsg: "Certo: área de proteção livre e sinalizada.", log: "Área de proteção de 30 a 50 m, livre, com barreira" },
-    { t: "Usar esse trecho para estacionar os caminhões de massa, que assim protegem a equipe", why: "A área de proteção não pode receber material nem equipamentos da obra: ela é o espaço de segurança se um veículo invadir." },
-    { t: "Dispensar a área de proteção quando o radar de velocidade estiver ligado", why: "O radar ajuda a reduzir a velocidade, mas não substitui o espaço de segurança antes do canteiro." }
+  setStep(2, TOTAL, "Espaçamento", "");
+  ask("esp", "Cones e tambores", "Qual o espaçamento máximo?", [
+    { t: "15 m na transição, 30 m na reta", ok: true, okMsg: "Certo.", log: "15 m na transição, 30 m na reta" },
+    { t: "30 m na transição, 60 m na reta", why: "Máximo: 15 m na transição e 30 m na reta." },
+    { t: "30 m em toda a obra", why: "Na transição o máximo é 15 m." }
   ], qOrder);
 }
 let orderIdx = 0;
 function qOrder() {
   S.k = "ordem"; orderIdx = 0;
-  setStep(5, TOTAL, "Implantação: toque nas áreas na ordem certa", "A sinalização aparece na cena conforme você implanta.");
+  setStep(3, TOTAL, "Toque nas áreas na ordem de implantação", "A sinalização aparece na pista.");
   view("overview");
   acts(shuffle(AREA_ORDER).map(([k, t]) => `<button class="btn" type="button" data-k="${k}">${t}</button>`).join(""));
   $("acts").querySelectorAll("[data-k]").forEach((b) => b.onclick = () => {
     const exp = AREA_ORDER[orderIdx][0], k = b.dataset.k;
-    if (k !== exp) { mistake(`Ordem errada: você implantou “${AREA_ORDER.find((a) => a[0] === k)[1]}” antes da hora. A implantação começa pela área mais distante do canteiro, no sentido do tráfego.`); return; }
+    if (k !== exp) { mistake("Ordem errada. Comece pela área mais distante do canteiro."); return; }
     Z[k].visible = true; b.disabled = true; b.classList.add("on"); orderIdx++;
-    good(`Implantado: ${AREA_ORDER[orderIdx - 1][1]}.`, `Implantou na ordem certa: ${AREA_ORDER[orderIdx - 1][1]}`);
+    good(`Implantado: ${AREA_ORDER[orderIdx - 1][1]}.`, `Ordem certa: ${AREA_ORDER[orderIdx - 1][1]}`);
     view(k === "pre" ? "preAll" : k === "ret" ? "fim" : k);
     if (orderIdx === AREA_ORDER.length) { acts(""); setTimeout(qNight, 1800); }
   });
 }
 const NIGHT_ITEMS = [
-  { k: "retro", t: "Placas, cones e tambores retrorrefletivos e limpos", ok: true },
-  { k: "flash", t: "Luzes amarelas intermitentes (≈ 60 piscadas/min) no início da transição", ok: true },
-  { k: "steady", t: "Luzes de emissão contínua nos cones da canalização", ok: true },
-  { k: "tower", t: "Torres de iluminação voltadas para a área de trabalho, sem ofuscar", ok: true },
-  { k: "vest", t: "Uniforme com faixas retrorrefletivas em todos os trabalhadores", ok: true },
-  { k: "allflash", t: "Luzes intermitentes em todos os cones, para marcar bem o caminho", ok: false, why: "Luz intermitente serve para chamar a atenção, não para delimitar o trajeto. Na canalização, use luz contínua." },
-  { k: "spot", t: "Refletores das torres virados para os carros que chegam, para eles verem a obra", ok: false, why: "A iluminação não pode ofuscar os motoristas. Direcione as torres para a área de trabalho." },
-  { k: "plain", t: "Cones sem faixa refletiva, já que a área está iluminada pelas torres", ok: false, why: "À noite todos os dispositivos devem ser retrorrefletivos, mesmo com iluminação." }
+  { k: "retro", t: "Dispositivos refletivos e limpos", ok: true },
+  { k: "flash", t: "Luz piscante no início da transição", ok: true },
+  { k: "steady", t: "Luz contínua nos cones", ok: true },
+  { k: "tower", t: "Torres de luz sem ofuscar", ok: true },
+  { k: "vest", t: "Uniforme refletivo", ok: true },
+  { k: "allflash", t: "Luz piscante em todos os cones", ok: false, why: "Piscante só alerta. Na canalização, luz contínua." },
+  { k: "spot", t: "Torres viradas para os carros", ok: false, why: "As torres não podem ofuscar o motorista." }
 ];
 let nightSel = new Set(NIGHT_ITEMS.filter((i) => i.ok).map((i) => i.k));
 function qNight() {
   S.k = "noite"; nightSel = new Set();
   setNight(true); view("trans");
-  setStep(6, TOTAL, "A obra continua à noite. O que precisa estar ativo?", "Marque o que é exigido e evite as armadilhas. Depois toque em Liberar.");
-  acts(shuffle(NIGHT_ITEMS).map((it) => `<button class="btn" type="button" data-k="${it.k}">${it.t}</button>`).join("") + `<button class="btn primary" type="button" id="nGo">Liberar o trabalho noturno</button>`);
+  setStep(4, TOTAL, "À noite: o que precisa estar ativo?", "Marque e toque em Liberar.");
+  acts(shuffle(NIGHT_ITEMS).map((it) => `<button class="btn" type="button" data-k="${it.k}">${it.t}</button>`).join("") + `<button class="btn primary" type="button" id="nGo">Liberar</button>`);
   $("acts").querySelectorAll("[data-k]").forEach((b) => b.onclick = () => { const k = b.dataset.k; if (nightSel.has(k)) nightSel.delete(k); else nightSel.add(k); b.classList.toggle("on", nightSel.has(k)); applyNightSel(); });
   $("nGo").onclick = () => {
     const wrong = NIGHT_ITEMS.filter((i) => !i.ok && nightSel.has(i.k)), missing = NIGHT_ITEMS.filter((i) => i.ok && !nightSel.has(i.k));
-    if (!wrong.length && !missing.length) { good("Sinalização noturna completa.", "Ativou todos os dispositivos noturnos exigidos"); acts(""); setTimeout(qDamaged, 1000); return; }
+    if (!wrong.length && !missing.length) { good("Sinalização noturna completa.", "Sinalização noturna completa"); acts(""); setTimeout(qLean, 1000); return; }
     wrong.forEach((w) => mistake(w.why));
     if (missing.length) mistake("Faltou: " + missing.map((m) => m.t.toLowerCase()).join("; ") + ".");
   };
@@ -917,54 +968,27 @@ function applyNightSel() {
   crew.forEach((w) => w.refl.forEach((m) => m.emissiveIntensity = n && nightSel.has("vest") ? 0.5 : 0));
 }
 function applyAllOn() { nightSel = new Set(NIGHT_ITEMS.filter((i) => i.ok).map((i) => i.k)); applyNightSel(); }
-function qDamaged() {
-  setNight(true); applyAllOn(); setProblems({ damaged: true }); view("sign60");
-  setStep(7, TOTAL, "Conferência noturna da sinalização", "");
-  ask("conserv", "Conservação", "Na ronda da noite você encontra a placa de 60 km/h com a película rasgada no topo, riscada e suja. O que fazer?", [
-    { t: "Deixar até o fim da obra, porque o número ainda dá para ler", why: "Película danificada e suja perde o brilho à noite. O manual pede limpeza e reposição imediata." },
-    { t: "Trocar na hora por uma placa reserva do canteiro e registrar a ocorrência", ok: true, okMsg: "Certo: reposição imediata, com reserva no canteiro.", log: "Trocou a placa danificada pela reserva" },
-    { t: "Virar a placa de costas até amanhecer, para não confundir o motorista", why: "Sem a placa, o motorista perde a ordem de reduzir a velocidade. Substitua por uma placa reserva." }
-  ], () => { setProblems(); qLean(); });
-}
 function qLean() {
-  setNight(false); setProblems({ lean: true }); view("sign80");
-  setStep(8, TOTAL, "Estabilidade da placa", "");
-  ask("lastro", "Cavaletes", "A placa de 80 km/h está tombando para trás, encostada na defensa, e balança quando passam caminhões. Qual é a solução?", [
-    { t: "Deixar encostada na defensa, que serve de apoio", why: "Encostada e inclinada, a placa sai do ângulo de visão do motorista e pode cair na pista com o vento dos caminhões." },
-    { t: "Colocar o cavalete de pé e lastrear os pés com sacos de areia", ok: true, okMsg: "Certo: cavalete aprumado e lastreado com sacos de areia.", log: "Aprumou e lastreou o cavalete com sacos de areia" },
-    { t: "Colocar pedras ou blocos de concreto sobre os pés do cavalete", why: "Pedras e blocos viram projéteis se um veículo atingir a placa. Use sacos de areia." }
-  ], () => { setProblems(); qDrop(); });
-}
-function qDrop() {
-  setNight(true); applyAllOn(); view("drop");
-  setStep(9, TOTAL, "Degrau da fresagem", "");
-  ask("degrau", "Desnível", "Depois da fresagem ficou um degrau entre a faixa 2 e o acostamento, e o serviço vai continuar à noite. O que é correto?", [
-    { t: "Manter o degrau dentro da área canalizada, com cones e luz ao longo dele, e só liberar a faixa depois do recapeamento ou com o desnível sinalizado", ok: true, okMsg: "Certo: desnível dentro da canalização e sinalizado.", log: "Manteve o degrau canalizado e sinalizado" },
-    { t: "Liberar a faixa 2 durante a noite para aliviar o trânsito, já que o degrau é pequeno", why: "Um degrau na borda pode fazer o motorista perder o controle, principalmente motos. Mantenha canalizado e sinalizado." },
-    { t: "Nada, porque o acostamento não é usado pelos veículos", why: "O acostamento é usado em emergência e por motos. O desnível precisa ficar protegido e sinalizado." }
-  ], qFlag);
-}
-function qFlag() {
-  setNight(false); view("flag");
-  setStep(10, TOTAL, "Sinaleiro com bandeira", "");
-  ask("band", "Sinaleiro", "O sinaleiro precisa parar o fluxo por um momento. Como ele deve fazer?", [
-    { t: "Voltado para o tráfego, bandeira estendida na horizontal na altura do ombro, perpendicular à faixa, e a outra mão espalmada para os motoristas", ok: true, okMsg: "Certo: esse é o sinal de parar.", log: "Sinal de parar feito corretamente" },
-    { t: "Voltado para o tráfego, levantando e abaixando a bandeira várias vezes", why: "Esse movimento é o de advertência. Para parar, a bandeira fica estendida na horizontal, na altura do ombro." },
-    { t: "No meio da faixa aberta, acenando a bandeira acima da cabeça para ser bem visto", why: "O sinaleiro fica em local visível e fora da circulação de veículos, com um cone 10 m antes dele." }
-  ], () => { setFlag("stop"); setTimeout(() => { setFlag("warn"); qRemove(); }, 2500); });
+  setNight(false); applyAllOn(); setProblems({ lean: true }); view("sign80");
+  setStep(5, TOTAL, "Placa tombada", "");
+  ask("lastro", "Cavalete", "A placa de 80 km/h tombou na defensa. O que fazer?", [
+    { t: "Deixar encostada", why: "Sai da vista do motorista e pode cair na pista." },
+    { t: "Aprumar e pôr sacos de areia", ok: true, okMsg: "Certo: aprumada e com sacos de areia.", log: "Aprumou e lastreou com sacos de areia" },
+    { t: "Pôr pedras nos pés", why: "Pedras viram projéteis. Use sacos de areia." }
+  ], () => { setProblems(); qRemove(); });
 }
 function qRemove() {
   setNight(false); applyAllOn(); view("overview");
-  setStep(11, TOTAL, "Fim do serviço", "");
-  ask("ret", "Desativação", "O serviço terminou. Em que ordem a sinalização é retirada?", [
-    { t: "Na ordem inversa da implantação: do fim das obras em direção à pré-sinalização", ok: true, okMsg: "Certo: retirada na ordem inversa.", log: "Retirou do fim das obras para a pré-sinalização" },
-    { t: "Primeiro a pré-sinalização, que está a 2 km e demora mais para recolher", why: "Sem a pré-sinalização, o motorista encontra a obra sem aviso. A retirada vai do fim das obras para a pré-sinalização." },
-    { t: "Primeiro a transição, para liberar a faixa 2 o quanto antes", why: "A retirada segue o inverso da implantação: começa pelo fim das obras." }
+  setStep(6, TOTAL, "Fim do serviço", "");
+  ask("ret", "Retirada", "Em que ordem retirar a sinalização?", [
+    { t: "Do fim das obras para a pré-sinalização", ok: true, okMsg: "Certo: ordem inversa.", log: "Retirada na ordem inversa" },
+    { t: "Começar pela pré-sinalização", why: "Sem aviso, o motorista é surpreendido pela obra." },
+    { t: "Começar pela transição", why: "A retirada começa pelo fim das obras." }
   ], finish);
 }
 function finish() {
   S.running = false;
-  const secs = Math.round((performance.now() - S.t0) / 1000), score = Math.max(0, Math.round(100 - S.errors * 9)), pass = score >= 70;
+  const secs = Math.round((performance.now() - S.t0) / 1000), score = Math.max(0, Math.round(100 - S.errors * 12)), pass = score >= 70;
   card(`<div class="eyebrow">${pass ? "Aprovado" : "Refazer"}</div><h1>Sinalização de obra · BR-101 Pista Sul</h1>
     <div class="res"><div><small>Nota</small><b>${score}</b></div><div><small>Tempo</small><b>${fmtT(secs)}</b></div><div><small>Erros</small><b>${S.errors}</b></div></div>
     <ol class="log">${S.log.map((l) => `<li class="${l.ok ? "" : "x"}">${l.ok ? "" : "Erro: "}${l.t}</li>`).join("")}</ol>
@@ -975,36 +999,40 @@ function finish() {
 
 // ---------- Correct-execution demonstration ----------
 let D = null, narr = true;
-function speak(text) {
-  try { speechSynthesis.cancel(); if (!narr) return; const u = new SpeechSynthesisUtterance(text); u.lang = "pt-BR"; u.rate = 1.03; const v = speechSynthesis.getVoices().find((x) => x.lang && x.lang.toLowerCase().startsWith("pt")); if (v) u.voice = v; speechSynthesis.speak(u); } catch (e) { /* no speech */ }
+function speak(text, onEnd) {
+  let done = false; const end = () => { if (!done) { done = true; onEnd && onEnd(); } };
+  try {
+    speechSynthesis.cancel(); if (!narr) { end(); return; }
+    const u = new SpeechSynthesisUtterance(text); u.lang = "pt-BR"; u.rate = 1.0;
+    const vs = speechSynthesis.getVoices().filter((x) => x.lang && x.lang.toLowerCase().startsWith("pt"));
+    const v = vs.find((x) => /br/i.test(x.lang) && /google|natural|luciana|francisca|online/i.test(x.name)) || vs.find((x) => /br/i.test(x.lang)) || vs[0];
+    if (v) u.voice = v;
+    u.onend = end; u.onerror = end; speechSynthesis.speak(u);
+    setTimeout(end, 4000 + text.length * 110);   // safety net if the browser never fires onend
+  } catch (e) { end(); }
 }
 const later = (ms, fn) => { const tok = D.token; setTimeout(() => { if (D && D.token === tok && S.demo) fn(); }, ms); };
 const DEMO = [
-  { k: "pre", short: "Pré-sinalização começando a 2 km, com redução de velocidade em degraus", cap: "A equipe começa pela pré-sinalização, a 2 quilômetros da obra. Anda pelo acostamento, de frente para o tráfego, com o uniforme refletivo, e vai avançando no sentido dos carros.", wait: 9000,
+  { k: "pre", short: "Pré-sinalização começando a 2 km, com redução de velocidade em degraus", cap: "Começa pela pré-sinalização, a 2 km. A equipe anda pelo acostamento, de frente para o tráfego.", wait: 9000,
     fx: (i) => { showAreas([]); setNight(false); installer.root.visible = true; installer.root.position.set(sx(0) + 6, 0, LANE + SH - 0.2); installer.faceTo(sx(0) - 20, LANE + SH - 0.2); carried.visible = false;
       const f = () => { Z.pre.visible = true; }; if (i) f(); else { installer.set(P.point); later(2500, f); } }, cam: [[sx(0) - 18, 3.2, 5.5], [sx(0) - 2, 1.4, LANE + SH]] },
-  { k: "pre", short: "Placas: obras a 2 km e a 1 km, 80 km/h, pista estreita a 500 m, 60 km/h, pista estreita a 300 m e obras a 100 m", cap: "Depois: obras a 1 quilômetro, velocidade de 80, pista estreita a 500 metros, velocidade de 60, pista estreita a 300 metros e obras a 100 metros. O boneco sinalizador reforça o alerta.", v: "preAll", fx: () => { Z.pre.visible = true; } },
-  { k: "trans", short: "Transição de 200 m com tambores e cones a cada 15 m", cap: `A transição tem ${TAPER} metros, porque a velocidade é de ${VREG} quilômetros por hora. Os primeiros dispositivos são tambores com luz piscante, e o espaçamento não passa de 15 metros.`, wait: 12000,
+  { k: "pre", short: "Placas: obras a 2 km e a 1 km, 80 km/h, pista estreita a 500 m, 60 km/h, pista estreita a 300 m e obras a 100 m", cap: "Depois: obras a 1 km, 80 km/h, pista estreita a 500 m, 60 km/h, pista estreita a 300 m e obras a 100 m.", v: "preAll", fx: () => { Z.pre.visible = true; } },
+  { k: "trans", short: "Transição de 200 m com tambores e cones a cada 15 m", cap: `Transição de ${TAPER} metros, com cones a cada 15 metros no máximo.`, wait: 12000,
     fx: (i) => { Z.trans.visible = true; if (i) { transCones.forEach((c) => c.visible = true); return; }
       transCones.forEach((c) => c.visible = false); installer.root.position.set(T0 - 6, 0, LANE + SH - 0.1); carried.visible = true; installer.set(P.carry);
       transCones.forEach((c, n) => later(600 + n * 700, () => { c.visible = true; }));
       later(300, () => { installer.idle(); installer.walkTo([[T0 + TAPER * 0.5, LANE + SH - 0.4]], () => { carried.visible = false; installer.set(P.point); }); }); },
     cam: [[T0 - 30, 9, -12], [T0 + 70, 0, 3]] },
-  { k: "prot", short: "Área de proteção de 30 m livre, com barreira, tambores e o radar de velocidade", cap: "Na área de proteção, 30 metros antes do canteiro, ficam a barreira, os tambores e o radar que mostra a velocidade do motorista. Nada de material estocado aqui.", v: "prot", fx: () => { Z.prot.visible = true; transCones.forEach((c) => c.visible = true); } },
-  { k: "ordem", short: "Implantar da área mais distante para o canteiro", cap: "Só agora o canteiro é liberado. A implantação sempre segue esta ordem: pré-sinalização, transição, proteção, canteiro, retorno e fim das obras.", v: "work", fx: () => { Z.work.visible = true; } },
-  { k: "esp", short: "Cones a cada 30 m na reta; 15 m de proteção depois do canteiro", cap: "Na reta, os cones ficam a no máximo 30 metros. Depois do canteiro há 15 metros de proteção, o retorno à faixa, a placa de fim das obras e a velocidade normal.", v: "fim", fx: () => { Z.ret.visible = true; Z.fim.visible = true; } },
-  { k: "noite", short: "À noite: retrorrefletivos, luzes piscantes no início, luz contínua na canalização e torres sem ofuscar", cap: "À noite, tudo é retrorrefletivo e limpo, as luzes amarelas piscam no início da transição, os cones têm luz contínua e as torres iluminam a área de trabalho sem ofuscar os motoristas.", v: "trans", wait: 9000,
+  { k: "prot", short: "Área de proteção de 30 m livre, com barreira, tambores e o radar de velocidade", cap: "Área de proteção: 30 metros livres antes do canteiro, com barreira e radar.", v: "prot", fx: () => { Z.prot.visible = true; transCones.forEach((c) => c.visible = true); } },
+  { k: "ordem", short: "Implantar da área mais distante para o canteiro", cap: "Só agora o canteiro é liberado para a equipe.", v: "work", fx: () => { Z.work.visible = true; } },
+  { k: "esp", short: "Cones a cada 30 m na reta; 15 m de proteção depois do canteiro", cap: "Na reta, cones a cada 30 metros. Depois vêm o retorno e o fim das obras.", v: "fim", fx: () => { Z.ret.visible = true; Z.fim.visible = true; } },
+  { k: "noite", short: "À noite: retrorrefletivos, luzes piscantes no início, luz contínua na canalização e torres sem ofuscar", cap: "À noite: tudo refletivo, piscante no início, luz contínua nos cones e torres sem ofuscar.", v: "trans", wait: 9000,
     fx: () => { showAreas(ALL); setNight(true); applyAllOn(); } },
-  { k: "conserv", short: "Placa danificada: trocar na hora pela reserva", cap: "Na ronda noturna, placa rasgada ou suja é trocada na hora por uma reserva do canteiro.", v: "sign60", wait: 8000,
-    fx: (i) => { if (i) return; setProblems({ damaged: true }); later(3500, () => setProblems()); } },
-  { k: "lastro", short: "Cavalete aprumado e lastreado com sacos de areia", cap: "Cavalete sempre de pé, virado para o motorista, com sacos de areia nos pés. Nunca pedras ou blocos de concreto.", v: "sign80", wait: 8000,
+  { k: "lastro", short: "Cavalete aprumado e lastreado com sacos de areia", cap: "Cavalete sempre de pé, com sacos de areia. Nunca pedras.", v: "sign80", wait: 8000,
     fx: (i) => { setNight(false); if (i) return; setProblems({ lean: true }); later(3500, () => setProblems()); } },
-  { k: "degrau", short: "Degrau da fresagem dentro da canalização, com cones e luz", cap: "O degrau da fresagem fica dentro da área canalizada, com cones e luz ao longo dele, até o recapeamento.", v: "drop", fx: () => { setNight(true); applyAllOn(); } },
-  { k: "band", short: "Sinaleiro: parar, siga e advertência, com cone 10 m antes", cap: "O sinaleiro fica fora do fluxo, com um cone 10 metros antes. Para parar: bandeira na horizontal, na altura do ombro, e a mão espalmada. Para seguir: de lado, bandeira baixa e gesto com a mão.", v: "flag", wait: 11000,
-    fx: (i) => { setNight(false); if (i) { setFlag("warn"); return; } setFlag("stop"); later(3500, () => setFlag("go")); later(7000, () => setFlag("warn")); } },
-  { k: "noite", short: "Visão do motorista à noite, com o radar mostrando a velocidade", cap: "Agora a visão do motorista à noite: avisos com antecedência, redução de 100 para 80 e 60, a diagonal bem marcada e o radar mostrando a velocidade.", wait: 34000,
+  { k: "noite", short: "Visão do motorista à noite, com o radar mostrando a velocidade", cap: "Visão do motorista à noite: aviso com antecedência e redução de 100 para 60.", wait: 34000,
     fx: (i) => { if (i) return; setNight(true); applyAllOn(); later(800, () => startDrive(4, null)); } },
-  { k: "ret", short: "Retirada na ordem inversa", cap: "No fim, a sinalização é retirada na ordem inversa: do fim das obras em direção à pré-sinalização.", v: "overview", wait: 9000,
+  { k: "ret", short: "Retirada na ordem inversa", cap: "No fim, a retirada é na ordem inversa: do fim das obras para a pré-sinalização.", v: "overview", wait: 9000,
     fx: (i) => { stopDrive(); setNight(false); const order = ["fim", "ret", "work", "prot", "trans", "pre"]; if (i) { showAreas([]); return; } showAreas(ALL); order.forEach((k, n) => later(1200 + n * 1100, () => Z[k].visible = false)); } }
 ];
 function demoReset() { stopDrive(); setNight(false); setProblems(); setFlag("warn"); showAreas([]); transCones.forEach((c) => c.visible = true); carried.visible = false; installer.idle(); }
@@ -1017,7 +1045,7 @@ function demoGo(i) {
   st.fx(false);
   if (st.cam) camTo(st.cam[0], st.cam[1]); else if (st.v) view(st.v);
   setStep(i + 1, DEMO.length, st.cap, "Execução correta · DNIT IPR-738");
-  const errs = S.log.filter((l) => !l.ok && l.k === st.k), first = DEMO.findIndex((s) => s.k === st.k) === i, note = $("demoNote");
+  const asked = S.log.some((l) => l.k === st.k), errs = S.log.filter((l) => !l.ok && l.k === st.k), first = asked && DEMO.findIndex((s) => s.k === st.k) === i, note = $("demoNote");
   if (first && errs.length) { note.className = "demo-note bad"; note.hidden = false; note.innerHTML = `<b>Você errou nesta etapa:</b><ul>${errs.map((e) => `<li>${e.t}</li>`).join("")}</ul>`; }
   else if (first && S.log.length) { note.className = "demo-note ok"; note.hidden = false; note.innerHTML = "<b>✓ Você fez esta etapa certo.</b>"; }
   else note.hidden = true;
@@ -1031,15 +1059,18 @@ function demoGo(i) {
   $("dPlay").onclick = () => { D.playing = !D.playing; demoGo(D.i); };
   $("dVoice").onclick = () => { narr = !narr; if (!narr) try { speechSynthesis.cancel(); } catch (e) {} demoGo(D.i); };
   $("dEnd").onclick = demoEnd;
-  speak(st.cap);
-  if (D.playing) D.timer = setTimeout(() => (D.i + 1 < DEMO.length ? demoGo(D.i + 1) : demoEnd()), st.wait || Math.max(6000, st.cap.length * 72));
+  // advance only after the minimum time AND the end of the narration
+  const tok = D.token; let minOk = false, spoke = false;
+  const next = () => { if (D && D.token === tok && D.playing && minOk && spoke) D.i + 1 < DEMO.length ? demoGo(D.i + 1) : demoEnd(); };
+  speak(st.cap, () => { spoke = true; setTimeout(next, 700); });
+  D.timer = setTimeout(() => { minOk = true; next(); }, st.wait || 4500);
 }
 function demoEnd() {
   clearTimeout(D.timer); D.token++; try { speechSynthesis.cancel(); } catch (e) {}
   stopDrive(); setNight(false); setProblems(); setFlag("warn"); showAreas(ALL); transCones.forEach((c) => c.visible = true); applyAllOn(); view("overview");
   $("demoNote").hidden = true; acts(""); S.demo = false;
   if (!S.log.length) { intro(); return; }
-  const keys = []; DEMO.forEach((s) => { if (!keys.includes(s.k)) keys.push(s.k); });
+  const keys = []; DEMO.forEach((s) => { if (!keys.includes(s.k) && S.log.some((l) => l.k === s.k)) keys.push(s.k); });
   const rows = keys.map((k) => { const errs = S.log.filter((l) => !l.ok && l.k === k); const caps = DEMO.filter((s) => s.k === k).map((s) => s.short); return `<tr><td class="${errs.length ? "bad" : "ok"}">${errs.length ? errs.map((e) => "✗ " + e.t).join("<br>") : "✓ Fez certo"}</td><td>${caps.join("<br>")}</td></tr>`; }).join("");
   card(`<div class="eyebrow">Comparativo</div><h2>O que você fez × o correto</h2>
     <div class="cmp-wrap"><table class="cmp"><thead><tr><th>O que você fez</th><th>O correto (DNIT IPR-738)</th></tr></thead><tbody>${rows}</tbody></table></div>
@@ -1102,6 +1133,7 @@ renderer.setAnimationLoop(() => {
     if (drive.x > WORK1 + 260) stopDrive();
   } else controls.update();
   if (!drive) tags.forEach((s) => { if (s.parent && s.parent.visible) s.visible = camera.position.distanceTo(s.getWorldPosition(tmp)) > 28; });
+  skyDome.position.set(camera.position.x, 0, camera.position.z);
   sun.target.position.copy(controls.target); sun.position.copy(controls.target).addScaledVector(sunDir, 100);
   renderer.render(scene, camera);
 });

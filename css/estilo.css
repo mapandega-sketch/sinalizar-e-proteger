@@ -70,4 +70,12 @@ ol.log .x { color: var(--bad); }
 .card .acts { display: flex; flex-wrap: wrap; gap: 8px; }
 .zones { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 14px; font-size: 13px; }
 .zones span { color: var(--muted); }
-@media (max-width: 640px) { .tbar { margin-left: 0; } .speed { top: 112px; } }
+@media (max-width: 640px) {
+  .top { gap: 6px 10px; padding-block: 8px; }
+  .brand span { display: none; }
+  .tbar { margin-left: 0; width: 100%; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .tbar::-webkit-scrollbar { display: none; }
+  .tb { flex: none; min-height: 36px; padding: 0 10px; }
+  .speed { top: 96px; }
+  .card { padding: 18px; }
+}
